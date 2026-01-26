@@ -129,6 +129,45 @@ function hasVisibleContent(node: SceneNode): boolean {
   return true;
 }
 
+// Pretty-print SVG with proper indentation
+function prettifySvg(svg: string): string {
+  // Remove existing whitespace between tags
+  let formatted = svg.replace(/>\s+</g, '><').trim();
+  
+  let result = '';
+  let indent = 0;
+  const indentStr = '  ';
+  
+  // Split by tags while keeping the tags
+  const tokens = formatted.split(/(<[^>]+>)/g).filter(t => t.trim());
+  
+  for (const token of tokens) {
+    const trimmed = token.trim();
+    if (!trimmed) continue;
+    
+    if (trimmed.startsWith('</')) {
+      // Closing tag - decrease indent first
+      indent = Math.max(0, indent - 1);
+      result += indentStr.repeat(indent) + trimmed + '\n';
+    } else if (trimmed.startsWith('<') && trimmed.endsWith('/>')) {
+      // Self-closing tag
+      result += indentStr.repeat(indent) + trimmed + '\n';
+    } else if (trimmed.startsWith('<?') || trimmed.startsWith('<!')) {
+      // XML declaration or doctype
+      result += trimmed + '\n';
+    } else if (trimmed.startsWith('<')) {
+      // Opening tag
+      result += indentStr.repeat(indent) + trimmed + '\n';
+      indent++;
+    } else {
+      // Text content
+      result += indentStr.repeat(indent) + trimmed + '\n';
+    }
+  }
+  
+  return result.trim();
+}
+
 // Export node as SVG
 async function exportAsSvg(node: SceneNode): Promise<string | undefined> {
   try {
@@ -151,7 +190,7 @@ async function exportAsSvg(node: SceneNode): Promise<string | undefined> {
       }
       // Only return if we got valid SVG content
       if (svgString && svgString.includes('<svg')) {
-        return svgString;
+        return prettifySvg(svgString);
       }
     }
   } catch (e) {
