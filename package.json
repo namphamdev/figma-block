@@ -1,0 +1,13 @@
+{
+  "name": "figma-block-structure-copier",
+  "version": "1.0.0",
+  "description": "Figma plugin to copy block structure, children, SVG icons, and padding",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.122.0",
+    "typescript": "^5.0.0"
+  }
+}

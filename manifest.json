@@ -1,0 +1,22 @@
+{
+  "name": "Block Structure Copier",
+  "id": "1597663728146594092",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+	"networkAccess": {"allowedDomains": ["none"]},
+	"documentAccess": "dynamic-page",
+  "capabilities": ["codegen", "inspect"],
+  "enableProposedApi": false,
+  "editorType": ["figma", "figjam", "dev"],
+  "codegenLanguages": [
+    { "label": "JSON Structure", "value": "json" },
+    { "label": "Console Log", "value": "console" }
+  ],
+  "menu": [
+    {
+      "name": "Copy Block Structure",
+      "command": "copy-structure"
+    }
+  ]
+}
