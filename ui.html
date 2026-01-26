@@ -181,6 +181,7 @@
       word-break: break-word;
       display: none;
       transition: border-color var(--transition-normal);
+      min-height: 70px;
     }
 
     .output:hover {
@@ -331,6 +332,26 @@
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
+      max-height: 70px;
+      overflow-y: auto;
+    }
+
+    .icon-grid::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+
+    .icon-grid::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .icon-grid::-webkit-scrollbar-thumb {
+      background: var(--bg-tertiary);
+      border-radius: 3px;
+    }
+
+    .icon-grid::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
     }
 
     .icon-item {
@@ -492,9 +513,9 @@
     /* Toast */
     .toast {
       position: fixed;
-      bottom: 24px;
+      top: 24px;
       left: 50%;
-      transform: translateX(-50%) translateY(100px);
+      transform: translateX(-50%) translateY(-100px);
       background: var(--bg-tertiary);
       color: var(--text-primary);
       padding: 10px 16px;

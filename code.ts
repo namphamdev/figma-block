@@ -1,6 +1,18 @@
 // Block Structure Copier - Figma Plugin
 // Extracts block structure, children, SVG icons, and padding from selected elements
 
+// Round numeric values to avoid floating-point precision issues
+// For pixel values, round to nearest integer if very close, otherwise keep 2 decimal places
+function roundValue(value: number): number {
+  // If the value is very close to an integer (within 0.001), round to integer
+  const rounded = Math.round(value);
+  if (Math.abs(value - rounded) < 0.001) {
+    return rounded;
+  }
+  // Otherwise, round to 2 decimal places
+  return Math.round(value * 100) / 100;
+}
+
 interface BlockStructure {
   id: string;
   name: string;
@@ -22,36 +34,63 @@ interface BlockStructure {
   strokeWeight?: number | typeof figma.mixed;
   opacity?: number;
   cornerRadius?: number | typeof figma.mixed;
+  effects?: readonly Effect[];
   children?: BlockStructure[];
   svgContent?: string;
   isIcon?: boolean;
+  // Text properties
+  textContent?: string;
+  fontSize?: number | typeof figma.mixed;
+  fontWeight?: number | typeof figma.mixed;
+  fontFamily?: string | typeof figma.mixed;
+  lineHeight?: { value?: number; unit: string } | typeof figma.mixed;
+  letterSpacing?: { value?: number; unit: string } | typeof figma.mixed;
+  textAlignHorizontal?: string;
+  textColor?: string;
 }
 
 // Extract padding from auto-layout frames
 function extractPadding(node: SceneNode): BlockStructure['padding'] | undefined {
   if ('paddingTop' in node) {
     return {
-      top: node.paddingTop ?? 0,
-      right: node.paddingRight ?? 0,
-      bottom: node.paddingBottom ?? 0,
-      left: node.paddingLeft ?? 0
+      top: roundValue(node.paddingTop ?? 0),
+      right: roundValue(node.paddingRight ?? 0),
+      bottom: roundValue(node.paddingBottom ?? 0),
+      left: roundValue(node.paddingLeft ?? 0)
     };
   }
   return undefined;
 }
 
 // Check if node is likely an icon (small vector/frame with vectors)
-// Optimized: only check immediate children, not deep scan with findAll()
+// Checks up to 3 levels deep to handle nested GROUP structures common in icon libraries
 function isLikelyIcon(node: SceneNode): boolean {
   if (node.type === 'VECTOR' || node.type === 'BOOLEAN_OPERATION') {
     return true;
   }
-  if ((node.type === 'FRAME' || node.type === 'COMPONENT' || node.type === 'INSTANCE') && node.width <= 64 && node.height <= 64) {
-    // Check immediate children only (avoid expensive findAll)
+  if ((node.type === 'FRAME' || node.type === 'COMPONENT' || node.type === 'INSTANCE' || node.type === 'GROUP') && node.width <= 64 && node.height <= 64) {
+    // Check up to 3 levels deep to find vector content
+    // This handles cases like: INSTANCE > GROUP > BOOLEAN_OPERATION
     if ('children' in node) {
       for (const child of node.children) {
         if (child.type === 'VECTOR' || child.type === 'BOOLEAN_OPERATION') {
           return true;
+        }
+        // Check grandchildren (level 2)
+        if ('children' in child) {
+          for (const grandchild of child.children) {
+            if (grandchild.type === 'VECTOR' || grandchild.type === 'BOOLEAN_OPERATION') {
+              return true;
+            }
+            // Check great-grandchildren (level 3)
+            if ('children' in grandchild) {
+              for (const greatGrandchild of grandchild.children) {
+                if (greatGrandchild.type === 'VECTOR' || greatGrandchild.type === 'BOOLEAN_OPERATION') {
+                  return true;
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -93,32 +132,46 @@ function hasVisibleContent(node: SceneNode): boolean {
 // Export node as SVG
 async function exportAsSvg(node: SceneNode): Promise<string | undefined> {
   try {
-    // Skip export if node has no visible content
-    if (!hasVisibleContent(node)) {
-      return undefined;
-    }
-    
     if ('exportAsync' in node) {
       const svgData = await node.exportAsync({ format: 'SVG' });
-      const svgString = String.fromCharCode(...svgData);
-      return svgString;
+      // Use TextDecoder for reliable conversion (handles large arrays)
+      // Fallback to chunk-based approach if TextDecoder not available
+      let svgString: string;
+      if (typeof TextDecoder !== 'undefined') {
+        svgString = new TextDecoder('utf-8').decode(svgData);
+      } else {
+        // Chunk-based conversion to avoid stack overflow
+        const chunks: string[] = [];
+        const chunkSize = 8192;
+        for (let i = 0; i < svgData.length; i += chunkSize) {
+          const chunk = svgData.slice(i, i + chunkSize);
+          chunks.push(String.fromCharCode.apply(null, Array.from(chunk)));
+        }
+        svgString = chunks.join('');
+      }
+      // Only return if we got valid SVG content
+      if (svgString && svgString.includes('<svg')) {
+        return svgString;
+      }
     }
   } catch (e) {
-    // Silently handle SVG export errors
+    // Log error for debugging (visible in Figma console)
+    console.error('SVG export failed for node:', node.name, e);
   }
   return undefined;
 }
 
 // Recursively extract block structure
-async function extractBlockStructure(node: SceneNode, depth: number = 0, onProgress?: () => void): Promise<BlockStructure> {
+// insideIcon: true when we're inside a node that's already been identified as an icon (to avoid duplicate SVGs)
+async function extractBlockStructure(node: SceneNode, depth: number = 0, onProgress?: () => void, insideIcon: boolean = false): Promise<BlockStructure> {
   // Call progress callback
   if (onProgress) onProgress();
   const structure: BlockStructure = {
     id: node.id,
     name: node.name,
     type: node.type,
-    width: node.width,
-    height: node.height
+    width: roundValue(node.width),
+    height: roundValue(node.height)
   };
 
   // Extract padding for auto-layout frames
@@ -127,7 +180,7 @@ async function extractBlockStructure(node: SceneNode, depth: number = 0, onProgr
   // Extract layout properties
   if ('layoutMode' in node && node.layoutMode !== 'NONE') {
     structure.layoutMode = node.layoutMode;
-    structure.itemSpacing = node.itemSpacing;
+    structure.itemSpacing = roundValue(node.itemSpacing);
     structure.primaryAxisAlignItems = node.primaryAxisAlignItems;
     structure.counterAxisAlignItems = node.counterAxisAlignItems;
   }
@@ -140,17 +193,55 @@ async function extractBlockStructure(node: SceneNode, depth: number = 0, onProgr
     structure.strokes = node.strokes;
   }
   if ('strokeWeight' in node) {
-    structure.strokeWeight = node.strokeWeight;
+    structure.strokeWeight = node.strokeWeight === figma.mixed ? figma.mixed : roundValue(node.strokeWeight as number);
   }
   if ('opacity' in node && node.opacity !== 1) {
-    structure.opacity = node.opacity;
+    structure.opacity = roundValue(node.opacity);
   }
   if ('cornerRadius' in node) {
-    structure.cornerRadius = node.cornerRadius;
+    structure.cornerRadius = node.cornerRadius === figma.mixed ? figma.mixed : roundValue(node.cornerRadius as number);
+  }
+  if ('effects' in node && Array.isArray(node.effects) && node.effects.length > 0) {
+    structure.effects = node.effects;
+  }
+
+  // Extract text properties for TEXT nodes
+  if (node.type === 'TEXT') {
+    const textNode = node as TextNode;
+    structure.textContent = textNode.characters;
+    structure.fontSize = textNode.fontSize === figma.mixed ? figma.mixed : roundValue(textNode.fontSize as number);
+    structure.fontWeight = textNode.fontWeight;
+    structure.letterSpacing = textNode.letterSpacing;
+    structure.lineHeight = textNode.lineHeight;
+    structure.textAlignHorizontal = textNode.textAlignHorizontal;
+    
+    // Extract font family
+    if (textNode.fontName !== figma.mixed) {
+      structure.fontFamily = textNode.fontName.family;
+    } else {
+      structure.fontFamily = figma.mixed;
+    }
+    
+    // Extract text color from fills
+    if (textNode.fills && textNode.fills !== figma.mixed && Array.isArray(textNode.fills)) {
+      const solidFill = textNode.fills.find((f): f is SolidPaint => f.type === 'SOLID' && f.visible !== false);
+      if (solidFill) {
+        const { r, g, b } = solidFill.color;
+        const a = solidFill.opacity ?? 1;
+        const toHex = (n: number) => Math.round(n * 255).toString(16).padStart(2, '0');
+        if (a < 1) {
+          structure.textColor = `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a.toFixed(2)})`;
+        } else {
+          structure.textColor = `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+        }
+      }
+    }
   }
 
   // Check if it's an icon and export SVG
-  if (isLikelyIcon(node)) {
+  // Skip if we're already inside an icon (parent was already exported as SVG)
+  const nodeIsIcon = !insideIcon && isLikelyIcon(node);
+  if (nodeIsIcon) {
     structure.isIcon = true;
     structure.svgContent = await exportAsSvg(node);
   }
@@ -167,7 +258,8 @@ async function extractBlockStructure(node: SceneNode, depth: number = 0, onProgr
       if ('opacity' in child && child.opacity === 0) {
         continue;
       }
-      const childStructure = await extractBlockStructure(child, depth + 1, onProgress);
+      // If current node is an icon, pass insideIcon=true to children to prevent duplicate SVG exports
+      const childStructure = await extractBlockStructure(child, depth + 1, onProgress, nodeIsIcon || insideIcon);
       structure.children.push(childStructure);
     }
   }
@@ -222,6 +314,40 @@ function formatForConsole(structure: BlockStructure, indent: number = 0): string
       const hexColor = `#${toHex(r)}${toHex(g)}${toHex(b)}`;
       const strokeWidth = structure.strokeWeight !== undefined && structure.strokeWeight !== figma.mixed ? structure.strokeWeight : 1;
       output += `${prefix}│  Stroke: ${hexColor} (${strokeWidth}px)\n`;
+    }
+  }
+
+  // Show text properties
+  if (structure.textContent !== undefined) {
+    const truncatedText = structure.textContent.length > 50 
+      ? structure.textContent.substring(0, 50) + '...' 
+      : structure.textContent;
+    output += `${prefix}│  Text: "${truncatedText}"\n`;
+    
+    if (structure.fontSize !== undefined && structure.fontSize !== figma.mixed) {
+      output += `${prefix}│  Font Size: ${structure.fontSize}px\n`;
+    }
+    if (structure.fontFamily !== undefined && structure.fontFamily !== figma.mixed) {
+      output += `${prefix}│  Font Family: ${structure.fontFamily}\n`;
+    }
+    if (structure.fontWeight !== undefined && structure.fontWeight !== figma.mixed) {
+      output += `${prefix}│  Font Weight: ${structure.fontWeight}\n`;
+    }
+    if (structure.lineHeight !== undefined && structure.lineHeight !== figma.mixed) {
+      const lh = structure.lineHeight as { value?: number; unit: string };
+      if (lh.unit === 'PIXELS' && lh.value !== undefined) {
+        output += `${prefix}│  Line Height: ${roundValue(lh.value)}px\n`;
+      } else if (lh.unit === 'PERCENT' && lh.value !== undefined) {
+        output += `${prefix}│  Line Height: ${roundValue(lh.value)}%\n`;
+      } else {
+        output += `${prefix}│  Line Height: auto\n`;
+      }
+    }
+    if (structure.textColor) {
+      output += `${prefix}│  Text Color: ${structure.textColor}\n`;
+    }
+    if (structure.textAlignHorizontal) {
+      output += `${prefix}│  Text Align: ${structure.textAlignHorizontal}\n`;
     }
   }
 
@@ -345,10 +471,89 @@ function generateCleanStructure(structure: BlockStructure): object {
     clean.borderRadius = structure.cornerRadius === figma.mixed ? 'mixed' : structure.cornerRadius;
   }
 
+  // Add effects/shadows to clean structure
+  if (structure.effects && Array.isArray(structure.effects) && structure.effects.length > 0) {
+    const shadows: any[] = [];
+    for (const effect of structure.effects) {
+      if (effect.type === 'DROP_SHADOW' && effect.visible !== false) {
+        const dropShadow = effect as DropShadowEffect;
+        const { r, g, b } = dropShadow.color;
+        const a = dropShadow.color.a ?? 1;
+        shadows.push({
+          type: 'dropShadow',
+          x: roundValue(dropShadow.offset.x),
+          y: roundValue(dropShadow.offset.y),
+          blur: roundValue(dropShadow.radius),
+          spread: dropShadow.spread ? roundValue(dropShadow.spread) : 0,
+          color: `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${roundValue(a)})`
+        });
+      } else if (effect.type === 'INNER_SHADOW' && effect.visible !== false) {
+        const innerShadow = effect as InnerShadowEffect;
+        const { r, g, b } = innerShadow.color;
+        const a = innerShadow.color.a ?? 1;
+        shadows.push({
+          type: 'innerShadow',
+          x: roundValue(innerShadow.offset.x),
+          y: roundValue(innerShadow.offset.y),
+          blur: roundValue(innerShadow.radius),
+          spread: innerShadow.spread ? roundValue(innerShadow.spread) : 0,
+          color: `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${roundValue(a)})`
+        });
+      }
+    }
+    if (shadows.length > 0) {
+      clean.shadows = shadows;
+    }
+  }
+
   if (structure.isIcon) {
     clean.isIcon = true;
     if (structure.svgContent) {
       clean.svg = structure.svgContent;
+    }
+  }
+
+  // Add text properties
+  if (structure.textContent !== undefined) {
+    clean.text = structure.textContent;
+    
+    const textStyle: any = {};
+    if (structure.fontSize !== undefined && structure.fontSize !== figma.mixed) {
+      textStyle.fontSize = structure.fontSize;
+    }
+    if (structure.fontFamily !== undefined && structure.fontFamily !== figma.mixed) {
+      textStyle.fontFamily = structure.fontFamily;
+    }
+    if (structure.fontWeight !== undefined && structure.fontWeight !== figma.mixed) {
+      textStyle.fontWeight = structure.fontWeight;
+    }
+    if (structure.lineHeight !== undefined && structure.lineHeight !== figma.mixed) {
+      const lh = structure.lineHeight as { value?: number; unit: string };
+      if (lh.unit === 'PIXELS' && lh.value !== undefined) {
+        textStyle.lineHeight = `${roundValue(lh.value)}px`;
+      } else if (lh.unit === 'PERCENT' && lh.value !== undefined) {
+        textStyle.lineHeight = `${roundValue(lh.value)}%`;
+      } else {
+        textStyle.lineHeight = 'auto';
+      }
+    }
+    if (structure.letterSpacing !== undefined && structure.letterSpacing !== figma.mixed) {
+      const ls = structure.letterSpacing as { value?: number; unit: string };
+      if (ls.unit === 'PIXELS' && ls.value !== undefined) {
+        textStyle.letterSpacing = `${roundValue(ls.value)}px`;
+      } else if (ls.unit === 'PERCENT' && ls.value !== undefined) {
+        textStyle.letterSpacing = `${roundValue(ls.value)}%`;
+      }
+    }
+    if (structure.textColor) {
+      textStyle.color = structure.textColor;
+    }
+    if (structure.textAlignHorizontal) {
+      textStyle.textAlign = structure.textAlignHorizontal.toLowerCase();
+    }
+    
+    if (Object.keys(textStyle).length > 0) {
+      clean.textStyle = textStyle;
     }
   }
 
@@ -360,10 +565,12 @@ function generateCleanStructure(structure: BlockStructure): object {
 }
 
 // Convert Figma properties to Tailwind CSS classes
-function generateTailwindClasses(structure: BlockStructure): string {
+// isRoot: true for root element to use responsive widths instead of fixed large widths
+function generateTailwindClasses(structure: BlockStructure, isRoot: boolean = false): string {
   const classes: string[] = [];
   
   // Width - common Tailwind width classes
+  // For root elements or very large widths (>500px), use responsive classes to prevent horizontal scroll
   const width = structure.width;
   if (width) {
     const widthMap: { [key: number]: string } = {
@@ -375,6 +582,14 @@ function generateTailwindClasses(structure: BlockStructure): string {
     };
     if (widthMap[width]) {
       classes.push(widthMap[width]);
+    } else if (isRoot && width > 500) {
+      // Root elements with large widths should use w-full max-w-full to be responsive
+      classes.push('w-full');
+      classes.push('max-w-full');
+    } else if (width > 768) {
+      // Large widths (>768px) should include max-w-full to prevent overflow
+      classes.push(`w-[${width}px]`);
+      classes.push('max-w-full');
     } else {
       classes.push(`w-[${width}px]`);
     }
@@ -572,21 +787,216 @@ function generateTailwindClasses(structure: BlockStructure): string {
     }
   }
 
+  // Shadow/Effects - Convert Figma effects to Tailwind shadow classes
+  if (structure.effects && Array.isArray(structure.effects) && structure.effects.length > 0) {
+    // Find drop shadows (most common shadow type)
+    const dropShadows = structure.effects.filter(
+      (e): e is DropShadowEffect => e.type === 'DROP_SHADOW' && e.visible !== false
+    );
+    
+    // Find inner shadows
+    const innerShadows = structure.effects.filter(
+      (e): e is InnerShadowEffect => e.type === 'INNER_SHADOW' && e.visible !== false
+    );
+    
+    if (dropShadows.length > 0) {
+      // Generate custom shadow from the first (or combined) drop shadow
+      const shadowParts: string[] = [];
+      for (const shadow of dropShadows) {
+        const x = roundValue(shadow.offset.x);
+        const y = roundValue(shadow.offset.y);
+        const blur = roundValue(shadow.radius);
+        const spread = shadow.spread ? roundValue(shadow.spread) : 0;
+        const { r, g, b } = shadow.color;
+        const a = shadow.color.a ?? 1;
+        const color = `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${roundValue(a)})`;
+        shadowParts.push(`${x}px ${y}px ${blur}px ${spread}px ${color}`);
+      }
+      
+      // Try to match common Tailwind shadow presets
+      if (dropShadows.length === 1) {
+        const shadow = dropShadows[0];
+        const x = shadow.offset.x;
+        const y = shadow.offset.y;
+        const blur = shadow.radius;
+        const spread = shadow.spread ?? 0;
+        
+        // Match approximate Tailwind shadow presets
+        if (x === 0 && y === 1 && blur <= 2 && spread <= 0) {
+          classes.push('shadow-sm');
+        } else if (x === 0 && y >= 1 && y <= 3 && blur >= 2 && blur <= 4 && spread <= 0) {
+          classes.push('shadow');
+        } else if (x === 0 && y >= 4 && y <= 6 && blur >= 6 && blur <= 10) {
+          classes.push('shadow-md');
+        } else if (x === 0 && y >= 10 && y <= 15 && blur >= 15 && blur <= 25) {
+          classes.push('shadow-lg');
+        } else if (x === 0 && y >= 20 && y <= 30 && blur >= 25 && blur <= 50) {
+          classes.push('shadow-xl');
+        } else if (x === 0 && y >= 25 && blur >= 50) {
+          classes.push('shadow-2xl');
+        } else {
+          // Custom shadow
+          classes.push(`shadow-[${shadowParts.join(',_')}]`);
+        }
+      } else {
+        // Multiple shadows - use custom
+        classes.push(`shadow-[${shadowParts.join(',_')}]`);
+      }
+    }
+    
+    if (innerShadows.length > 0) {
+      // Tailwind uses shadow-inner for inner shadows
+      const shadow = innerShadows[0];
+      const x = roundValue(shadow.offset.x);
+      const y = roundValue(shadow.offset.y);
+      const blur = roundValue(shadow.radius);
+      const { r, g, b } = shadow.color;
+      const a = shadow.color.a ?? 1;
+      
+      // Check if it matches the default inner shadow pattern
+      if (x === 0 && y === 2 && blur === 4) {
+        classes.push('shadow-inner');
+      } else {
+        const color = `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${roundValue(a)})`;
+        classes.push(`shadow-[inset_${x}px_${y}px_${blur}px_${color}]`);
+      }
+    }
+  }
+
+  // Text styling classes
+  if (structure.textContent !== undefined) {
+    // Font size
+    if (structure.fontSize !== undefined && structure.fontSize !== figma.mixed) {
+      const fontSize = structure.fontSize as number;
+      const fontSizeMap: { [key: number]: string } = {
+        12: 'text-xs', 14: 'text-sm', 16: 'text-base', 18: 'text-lg',
+        20: 'text-xl', 24: 'text-2xl', 30: 'text-3xl', 36: 'text-4xl',
+        48: 'text-5xl', 60: 'text-6xl', 72: 'text-7xl', 96: 'text-8xl', 128: 'text-9xl'
+      };
+      if (fontSizeMap[fontSize]) {
+        classes.push(fontSizeMap[fontSize]);
+      } else {
+        classes.push(`text-[${fontSize}px]`);
+      }
+    }
+
+    // Font weight
+    if (structure.fontWeight !== undefined && structure.fontWeight !== figma.mixed) {
+      const fontWeight = structure.fontWeight as number;
+      const fontWeightMap: { [key: number]: string } = {
+        100: 'font-thin', 200: 'font-extralight', 300: 'font-light',
+        400: 'font-normal', 500: 'font-medium', 600: 'font-semibold',
+        700: 'font-bold', 800: 'font-extrabold', 900: 'font-black'
+      };
+      if (fontWeightMap[fontWeight]) {
+        classes.push(fontWeightMap[fontWeight]);
+      } else {
+        classes.push(`font-[${fontWeight}]`);
+      }
+    }
+
+    // Line height
+    if (structure.lineHeight !== undefined && structure.lineHeight !== figma.mixed) {
+      const lh = structure.lineHeight as { value?: number; unit: string };
+      if (lh.unit === 'PIXELS' && lh.value !== undefined) {
+        const roundedValue = roundValue(lh.value);
+        const lineHeightMap: { [key: number]: string } = {
+          16: 'leading-4', 20: 'leading-5', 24: 'leading-6', 28: 'leading-7',
+          32: 'leading-8', 36: 'leading-9', 40: 'leading-10'
+        };
+        if (lineHeightMap[roundedValue]) {
+          classes.push(lineHeightMap[roundedValue]);
+        } else {
+          classes.push(`leading-[${roundedValue}px]`);
+        }
+      } else if (lh.unit === 'PERCENT' && lh.value !== undefined) {
+        const roundedValue = roundValue(lh.value);
+        const percentValue = roundedValue / 100;
+        if (percentValue === 1) {
+          classes.push('leading-none');
+        } else if (percentValue === 1.25) {
+          classes.push('leading-tight');
+        } else if (percentValue === 1.375) {
+          classes.push('leading-snug');
+        } else if (percentValue === 1.5) {
+          classes.push('leading-normal');
+        } else if (percentValue === 1.625) {
+          classes.push('leading-relaxed');
+        } else if (percentValue === 2) {
+          classes.push('leading-loose');
+        } else {
+          classes.push(`leading-[${roundedValue}%]`);
+        }
+      }
+    }
+
+    // Letter spacing
+    if (structure.letterSpacing !== undefined && structure.letterSpacing !== figma.mixed) {
+      const ls = structure.letterSpacing as { value?: number; unit: string };
+      if (ls.unit === 'PIXELS' && ls.value !== undefined && ls.value !== 0) {
+        const roundedLs = roundValue(ls.value);
+        if (roundedLs < 0) {
+          classes.push('tracking-tighter');
+        } else if (roundedLs <= 0.025 * 16) {
+          classes.push('tracking-tight');
+        } else if (roundedLs <= 0.05 * 16) {
+          classes.push('tracking-wide');
+        } else if (roundedLs <= 0.1 * 16) {
+          classes.push('tracking-wider');
+        } else {
+          classes.push(`tracking-[${roundedLs}px]`);
+        }
+      } else if (ls.unit === 'PERCENT' && ls.value !== undefined && ls.value !== 0) {
+        classes.push(`tracking-[${roundValue(ls.value)}%]`);
+      }
+    }
+
+    // Text color
+    if (structure.textColor) {
+      const colorMatches: { [key: string]: string } = {
+        '#ffffff': 'text-white', '#000000': 'text-black',
+        '#f9fafb': 'text-gray-50', '#f3f4f6': 'text-gray-100', '#e5e7eb': 'text-gray-200',
+        '#d1d5db': 'text-gray-300', '#9ca3af': 'text-gray-400', '#6b7280': 'text-gray-500',
+        '#4b5563': 'text-gray-600', '#374151': 'text-gray-700', '#1f2937': 'text-gray-800', '#111827': 'text-gray-900',
+        '#ef4444': 'text-red-500', '#f97316': 'text-orange-500', '#eab308': 'text-yellow-500',
+        '#22c55e': 'text-green-500', '#3b82f6': 'text-blue-500', '#8b5cf6': 'text-violet-500',
+        '#ec4899': 'text-pink-500'
+      };
+      const lowerColor = structure.textColor.toLowerCase();
+      if (colorMatches[lowerColor]) {
+        classes.push(colorMatches[lowerColor]);
+      } else {
+        classes.push(`text-[${structure.textColor}]`);
+      }
+    }
+
+    // Text alignment
+    if (structure.textAlignHorizontal) {
+      const alignMap: { [key: string]: string } = {
+        'LEFT': 'text-left', 'CENTER': 'text-center', 'RIGHT': 'text-right', 'JUSTIFIED': 'text-justify'
+      };
+      if (alignMap[structure.textAlignHorizontal]) {
+        classes.push(alignMap[structure.textAlignHorizontal]);
+      }
+    }
+  }
+
   return classes.join(' ');
 }
 
 // Generate Tailwind output for entire structure tree
-function generateTailwindOutput(structure: BlockStructure, indent: number = 0): string {
+// isRoot is true for the top-level element to use responsive width classes
+function generateTailwindOutput(structure: BlockStructure, indent: number = 0, isRoot: boolean = true): string {
   const prefix = '  '.repeat(indent);
   let output = '';
   
-  const tailwindClasses = generateTailwindClasses(structure);
+  const tailwindClasses = generateTailwindClasses(structure, isRoot);
   output += `${prefix}/* ${structure.name} (${structure.type}) */\n`;
   output += `${prefix}className="${tailwindClasses}"\n`;
   
   if (structure.children && structure.children.length > 0) {
     structure.children.forEach(child => {
-      output += '\n' + generateTailwindOutput(child, indent + 1);
+      output += '\n' + generateTailwindOutput(child, indent + 1, false);
     });
   }
   
