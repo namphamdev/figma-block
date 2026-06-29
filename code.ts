@@ -1,6 +1,12 @@
 // Block Structure Copier - Figma Plugin
 // Extracts block structure, children, SVG icons, and padding from selected elements
 
+// Debug log collector - accumulated during extraction, sent with structure message
+let debugLogs: string[] = [];
+function debugLog(msg: string) {
+  debugLogs.push(msg);
+}
+
 // Round numeric values to avoid floating-point precision issues
 // For pixel values, round to nearest integer if very close, otherwise keep 2 decimal places
 function roundValue(value: number): number {
@@ -230,6 +236,16 @@ async function extractBlockStructure(node: SceneNode, depth: number = 0, onProgr
   }
   if ('strokes' in node) {
     structure.strokes = node.strokes;
+    if (Array.isArray(node.strokes) && node.strokes.length > 0) {
+      const debugStrokes = node.strokes.map((s: any) => ({
+        type: s.type,
+        color: s.color,
+        opacity: s.opacity,
+        visible: s.visible,
+        keys: Object.keys(s)
+      }));
+      debugLog(`[EXTRACT] node="${node.name}" strokes=${JSON.stringify(debugStrokes)}`);
+    }
   }
   if ('strokeWeight' in node) {
     structure.strokeWeight = node.strokeWeight === figma.mixed ? figma.mixed : roundValue(node.strokeWeight as number);
@@ -349,10 +365,13 @@ function formatForConsole(structure: BlockStructure, indent: number = 0): string
     const solidStroke = structure.strokes.find((s): s is SolidPaint => s.type === 'SOLID' && s.visible !== false);
     if (solidStroke) {
       const { r, g, b } = solidStroke.color;
+      const a = solidStroke.opacity ?? 1;
       const toHex = (n: number) => Math.round(n * 255).toString(16).padStart(2, '0');
       const hexColor = `#${toHex(r)}${toHex(g)}${toHex(b)}`;
       const strokeWidth = structure.strokeWeight !== undefined && structure.strokeWeight !== figma.mixed ? structure.strokeWeight : 1;
-      output += `${prefix}│  Stroke: ${hexColor} (${strokeWidth}px)\n`;
+      const strokeOpacityStr = a < 1 ? `, ${Math.round(a * 100)}%` : '';
+      output += `${prefix}│  Stroke: ${hexColor} (${strokeWidth}px${strokeOpacityStr})\n`;
+      debugLog(`[STROKE FORMAT] name=${structure.name} keys=${Object.keys(solidStroke).join(',')} opacity=${solidStroke.opacity} color.a=${(solidStroke.color as any).a} color=${JSON.stringify(solidStroke.color)}`);
     }
   }
 
@@ -1174,10 +1193,10 @@ async function main() {
     consoleOutput: consoleOutput,
     jsonOutput: JSON.stringify(jsonOutput, null, 2),
     tailwindOutput: tailwindOutput,
-    rawStructure: jsonOutput
+    rawStructure: jsonOutput,
+    debugLogs: debugLogs
   });
-
-  figma.notify('Block structure extracted! Check the plugin window.');
+  debugLogs = [];
 }
 
 // Handle messages from UI
@@ -1240,8 +1259,10 @@ async function refreshStructure() {
     consoleOutput: consoleOutput,
     jsonOutput: JSON.stringify(jsonOutput, null, 2),
     tailwindOutput: tailwindOutput,
-    rawStructure: jsonOutput
+    rawStructure: jsonOutput,
+    debugLogs: debugLogs
   });
+  debugLogs = [];
 
   figma.notify('Block structure refreshed!');
 }
