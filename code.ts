@@ -175,6 +175,230 @@ function prettifySvg(svg: string): string {
 }
 
 // Export node as SVG
+interface ExportedImagePayload {
+  id: string;
+  name: string;
+  type: string;
+  width: number;
+  height: number;
+  format: 'PNG' | 'JPG';
+  mimeType: string;
+  fileName: string;
+  dataBase64: string;
+  source: 'node' | 'fill';
+}
+
+function sanitizeFileName(name: string): string {
+  const cleaned = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim();
+  return cleaned.length > 0 ? cleaned.slice(0, 120) : 'image';
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, Array.from(chunk));
+  }
+  if (typeof btoa !== 'undefined') {
+    return btoa(binary);
+  }
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let result = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i];
+    const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
+    const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+    result += chars[a >> 2];
+    result += chars[((a & 3) << 4) | (b >> 4)];
+    result += i + 1 < bytes.length ? chars[((b & 15) << 2) | (c >> 6)] : '=';
+    result += i + 2 < bytes.length ? chars[c & 63] : '=';
+  }
+  return result;
+}
+
+interface ImageFillRef {
+  node: SceneNode;
+  paint: ImagePaint;
+  fillIndex: number;
+}
+
+function getImageFillsFromNode(node: SceneNode): ImageFillRef[] {
+  const refs: ImageFillRef[] = [];
+  if (!('fills' in node) || node.fills === figma.mixed || !Array.isArray(node.fills)) {
+    return refs;
+  }
+  node.fills.forEach((fill, fillIndex) => {
+    if (fill.type === 'IMAGE' && fill.visible !== false && fill.imageHash) {
+      refs.push({ node, paint: fill, fillIndex });
+    }
+  });
+  return refs;
+}
+
+function collectImageFillRefs(root: SceneNode, out: ImageFillRef[], onProgress?: () => void): void {
+  if ('visible' in root && root.visible === false) {
+    return;
+  }
+  if ('opacity' in root && root.opacity === 0) {
+    return;
+  }
+  if (onProgress) {
+    onProgress();
+  }
+
+  out.push(...getImageFillsFromNode(root));
+
+  if ('children' in root) {
+    for (const child of root.children) {
+      collectImageFillRefs(child, out, onProgress);
+    }
+  }
+}
+
+function detectImageMime(bytes: Uint8Array): { mimeType: string; ext: string } {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return { mimeType: 'image/png', ext: 'png' };
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return { mimeType: 'image/jpeg', ext: 'jpg' };
+  }
+  if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
+    return { mimeType: 'image/webp', ext: 'webp' };
+  }
+  return { mimeType: 'image/png', ext: 'png' };
+}
+
+async function loadNodeIfNeeded(node: SceneNode): Promise<void> {
+  if ('loadAsync' in node && typeof (node as { loadAsync?: () => Promise<void> }).loadAsync === 'function') {
+    await (node as { loadAsync: () => Promise<void> }).loadAsync();
+  }
+}
+
+async function exportNodeAsRaster(
+  node: SceneNode,
+  index: number,
+  fillIndex: number
+): Promise<ExportedImagePayload | undefined> {
+  if (!('exportAsync' in node)) {
+    return undefined;
+  }
+  try {
+    await loadNodeIfNeeded(node);
+    const width = roundValue(node.width);
+    const height = roundValue(node.height);
+    if (width <= 0 || height <= 0) {
+      return undefined;
+    }
+    const maxSide = Math.max(width, height);
+    let constraint: ExportSettingsConstraints | undefined;
+    if (maxSide > 2048) {
+      constraint = { type: 'WIDTH', value: 2048 };
+    } else if (maxSide > 1024) {
+      constraint = { type: 'SCALE', value: 1 };
+    } else {
+      constraint = { type: 'SCALE', value: 2 };
+    }
+    const bytes = await node.exportAsync({
+      format: 'PNG',
+      constraint
+    });
+    const baseName = sanitizeFileName(node.name);
+    const fileName = `${baseName}${fillIndex > 0 ? `-fill-${fillIndex + 1}` : ''}-${index + 1}.png`;
+    return {
+      id: `${node.id}:${fillIndex}`,
+      name: node.name,
+      type: node.type,
+      width,
+      height,
+      format: 'PNG',
+      mimeType: 'image/png',
+      fileName,
+      dataBase64: uint8ArrayToBase64(bytes),
+      source: 'node'
+    };
+  } catch (e) {
+    debugLog(`[IMAGE] exportAsync failed for "${node.name}": ${String(e)}`);
+    return undefined;
+  }
+}
+
+async function exportImageFromHash(
+  ref: ImageFillRef,
+  index: number
+): Promise<ExportedImagePayload | undefined> {
+  const { node, paint, fillIndex } = ref;
+  const hash = paint.imageHash;
+  if (!hash) {
+    return undefined;
+  }
+  try {
+    await loadNodeIfNeeded(node);
+    const image = figma.getImageByHash(hash);
+    if (!image) {
+      debugLog(`[IMAGE] getImageByHash returned null for "${node.name}" hash=${hash}`);
+      return await exportNodeAsRaster(node, index, fillIndex);
+    }
+    const bytes = await image.getBytesAsync();
+    if (!bytes || bytes.length === 0) {
+      return await exportNodeAsRaster(node, index, fillIndex);
+    }
+    const { mimeType, ext } = detectImageMime(bytes);
+    const baseName = sanitizeFileName(node.name);
+    const fileName = `${baseName}${fillIndex > 0 ? `-fill-${fillIndex + 1}` : ''}-${index + 1}.${ext}`;
+    const width = roundValue(node.width);
+    const height = roundValue(node.height);
+    return {
+      id: `${node.id}:${fillIndex}:${hash}`,
+      name: node.name,
+      type: node.type,
+      width,
+      height,
+      format: ext === 'jpg' ? 'JPG' : 'PNG',
+      mimeType,
+      fileName,
+      dataBase64: uint8ArrayToBase64(bytes),
+      source: 'fill'
+    };
+  } catch (e) {
+    debugLog(`[IMAGE] getBytesAsync failed for "${node.name}": ${String(e)}`);
+    return await exportNodeAsRaster(node, index, fillIndex);
+  }
+}
+
+async function exportImagesFromRoots(
+  roots: readonly SceneNode[],
+  onProgress?: () => void
+): Promise<ExportedImagePayload[]> {
+  const refs: ImageFillRef[] = [];
+  for (const root of roots) {
+    await loadNodeIfNeeded(root);
+    collectImageFillRefs(root, refs, onProgress);
+  }
+
+  debugLog(`[IMAGE] found ${refs.length} image fill(s) in selection`);
+
+  const seenKeys = new Set<string>();
+  const uniqueRefs: ImageFillRef[] = [];
+  for (const ref of refs) {
+    const key = `${ref.node.id}:${ref.fillIndex}:${ref.paint.imageHash ?? ''}`;
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      uniqueRefs.push(ref);
+    }
+  }
+
+  const results: ExportedImagePayload[] = [];
+  for (let i = 0; i < uniqueRefs.length; i++) {
+    const payload = await exportImageFromHash(uniqueRefs[i], i);
+    if (payload) {
+      results.push(payload);
+    }
+  }
+  debugLog(`[IMAGE] exported ${results.length} image(s)`);
+  return results;
+}
+
 async function exportAsSvg(node: SceneNode): Promise<string | undefined> {
   try {
     if ('exportAsync' in node) {
@@ -1186,6 +1410,7 @@ async function main() {
     ? generateCleanStructure(structures[0])
     : structures.map(s => generateCleanStructure(s));
   const tailwindOutput = structures.map(s => generateTailwindOutput(s)).join('\n\n');
+  const images = await exportImagesFromRoots(selection, updateProgress);
 
   // Send to UI
   figma.ui.postMessage({
@@ -1194,7 +1419,8 @@ async function main() {
     jsonOutput: JSON.stringify(jsonOutput, null, 2),
     tailwindOutput: tailwindOutput,
     rawStructure: jsonOutput,
-    debugLogs: debugLogs
+    debugLogs: debugLogs,
+    images: images
   });
   debugLogs = [];
 }
@@ -1252,6 +1478,7 @@ async function refreshStructure() {
     ? generateCleanStructure(structures[0])
     : structures.map(s => generateCleanStructure(s));
   const tailwindOutput = structures.map(s => generateTailwindOutput(s)).join('\n\n');
+  const images = await exportImagesFromRoots(selection, updateProgress);
 
   // Send to UI
   figma.ui.postMessage({
@@ -1260,7 +1487,8 @@ async function refreshStructure() {
     jsonOutput: JSON.stringify(jsonOutput, null, 2),
     tailwindOutput: tailwindOutput,
     rawStructure: jsonOutput,
-    debugLogs: debugLogs
+    debugLogs: debugLogs,
+    images: images
   });
   debugLogs = [];
 

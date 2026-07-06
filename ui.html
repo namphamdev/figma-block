@@ -576,6 +576,95 @@
       border-bottom: 1px solid #ffffff08;
     }
 
+    .output.images-view {
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      font-family: 'IBM Plex Sans', sans-serif;
+      white-space: normal;
+    }
+
+    .output.images-view.active {
+      display: flex;
+    }
+
+    .images-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .images-toolbar .meta {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .images-toolbar .btn-secondary {
+      padding: 6px 10px;
+      font-size: 10px;
+    }
+
+    .images-list {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 0;
+    }
+
+    .image-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      transition: border-color var(--transition-fast);
+    }
+
+    .image-row:hover {
+      border-color: var(--border-hover);
+    }
+
+    .image-thumb {
+      width: 48px;
+      height: 48px;
+      object-fit: contain;
+      background: var(--bg-primary);
+      border-radius: var(--radius-sm);
+      flex-shrink: 0;
+    }
+
+    .image-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .image-info .name {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .image-info .details {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .image-download-btn {
+      padding: 6px 10px;
+      font-size: 10px;
+      flex-shrink: 0;
+    }
+
     /* Reduced Motion */
     @media (prefers-reduced-motion: reduce) {
       *,
@@ -628,6 +717,14 @@
       </svg>
       JSON
     </button>
+    <button class="tab" data-tab="images">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>
+        <circle cx="9" cy="9" r="2"/>
+        <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>
+      </svg>
+      Images
+    </button>
     <button class="tab" data-tab="debug">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="m8 2 1.88 1.88"/>
@@ -652,6 +749,13 @@
     <pre class="output json-view" id="json-output">Extracting structure...</pre>
     <pre class="output tailwind-view" id="tailwind-output">Extracting structure...</pre>
     <div class="output debug-view" id="debug-output" style="font-size: 10px;"></div>
+    <div class="output images-view" id="images-output">
+      <div class="images-toolbar">
+        <span class="meta" id="images-summary">No images in selection</span>
+        <button type="button" class="btn-secondary" id="download-all-images-btn" disabled>Download all</button>
+      </div>
+      <div class="images-list" id="images-list"></div>
+    </div>
   </div>
 
   <!-- Progress Bar -->
@@ -740,7 +844,8 @@
       consoleOutput: '',
       jsonOutput: '',
       tailwindOutput: '',
-      rawStructure: null
+      rawStructure: null,
+      images: []
     };
 
     // Icons for status
@@ -757,6 +862,91 @@
         const tabName = tab.dataset.tab;
         document.getElementById(tabName + '-output').classList.add('active');
       });
+    });
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function base64ToBlob(base64, mimeType) {
+      const binary = atob(base64);
+      const len = binary.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return new Blob([bytes], { type: mimeType });
+    }
+
+    function triggerDownload(blob, fileName) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    function downloadImageItem(image) {
+      const blob = base64ToBlob(image.dataBase64, image.mimeType);
+      triggerDownload(blob, image.fileName);
+    }
+
+    function downloadAllImages(images) {
+      images.forEach((img, i) => {
+        setTimeout(() => downloadImageItem(img), i * 200);
+      });
+    }
+
+    function renderImageList(images) {
+      const list = document.getElementById('images-list');
+      const summary = document.getElementById('images-summary');
+      const downloadAllBtn = document.getElementById('download-all-images-btn');
+      currentData.images = images || [];
+
+      if (!images || images.length === 0) {
+        summary.textContent = 'No image fills found in the selected block';
+        downloadAllBtn.disabled = true;
+        list.innerHTML = '<div class="empty-state"><p>No IMAGE fills detected under this selection. Image must be applied as a layer fill (not only as a placed image node). Open the Debug tab after refresh for [IMAGE] logs.</p></div>';
+        return;
+      }
+
+      summary.textContent = `${images.length} image${images.length === 1 ? '' : 's'} in selection`;
+      downloadAllBtn.disabled = false;
+      list.innerHTML = images.map((img, index) => {
+        const src = `data:${img.mimeType};base64,${img.dataBase64}`;
+        const details = `${Math.round(img.width)}×${Math.round(img.height)} · ${img.type} · ${img.fileName}`;
+        return `
+          <div class="image-row" data-image-index="${index}">
+            <img class="image-thumb" src="${src}" alt="" />
+            <div class="image-info">
+              <div class="name" title="${escapeHtml(img.name)}">${escapeHtml(img.name)}</div>
+              <div class="details">${escapeHtml(details)}</div>
+            </div>
+            <button type="button" class="btn-secondary image-download-btn" data-image-index="${index}">Download</button>
+          </div>
+        `;
+      }).join('');
+
+      list.querySelectorAll('.image-download-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt(btn.getAttribute('data-image-index'), 10);
+          downloadImageItem(images[idx]);
+          showToast(`Downloaded ${images[idx].fileName}`);
+        });
+      });
+    }
+
+    document.getElementById('download-all-images-btn').addEventListener('click', () => {
+      if (!currentData.images || currentData.images.length === 0) return;
+      downloadAllImages(currentData.images);
+      showToast(`Downloading ${currentData.images.length} images`);
     });
 
     // Extract icons from structure
@@ -870,6 +1060,11 @@
         text = currentData.consoleOutput;
       } else if (activeTab === 'json') {
         text = currentData.jsonOutput;
+      } else if (activeTab === 'debug') {
+        text = debugOutput.innerText;
+      } else if (activeTab === 'images') {
+        showToast('Use Download on each image or Download all');
+        return;
       } else {
         text = currentData.tailwindOutput;
       }
@@ -935,12 +1130,15 @@
           consoleOutput: msg.consoleOutput,
           jsonOutput: msg.jsonOutput,
           tailwindOutput: msg.tailwindOutput,
-          rawStructure: msg.rawStructure
+          rawStructure: msg.rawStructure,
+          images: msg.images || []
         };
 
         document.getElementById('console-output').textContent = msg.consoleOutput;
         document.getElementById('json-output').textContent = msg.jsonOutput;
         document.getElementById('tailwind-output').textContent = msg.tailwindOutput;
+
+        renderImageList(msg.images || []);
 
         // Show debug logs bundled with structure
         if (msg.debugLogs && msg.debugLogs.length > 0) {
